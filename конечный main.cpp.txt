@@ -1,0 +1,223 @@
+#include <iostream> // ввод/вывод
+#include <string> // работа со строками
+#include <vector> // работа с динамическими массивами
+#include <map> // работа с ассоциативными массивами
+#include <curl/curl.h> // работа с библиотекой libcurl, которая используется для отправки HTTP запросов
+#include "TokenManager.h" // для создания токенов
+#include "UserManager.h" // отвечает за управление пользователями
+#include "TestManager.h" // овтечает за управление тестами
+#include <nlohmann/json.hpp>  // Подключаем библиотеку для работы с JSON
+
+// Простая структура для взаимодействия с пользователями (хранение токенов авториз. польз.)
+std::map<std::string, std::string> sessionTokens; // ключи (email польз. и токен сессии)
+
+// Прототип функции, которая будет парсить (анализировать) JSON-ответ с информацией о тестах и выводить ее.
+void parseAndDisplayTests(const std::string& jsonResponse);
+
+// Функция обратного вызова для curl, записывает ответ сервера в строку
+size_t writeCallback(void* contents, size_t size, size_t nmemb, void* userData) {
+    // Вычисляем общий размер полученных данных
+    size_t totalSize = size * nmemb;
+    // Получаем указатель на строку, в которую нужно записать данные
+    std::string* response = static_cast<std::string*>(userData);
+    // Добавляем полученные данные в строку
+    response->append(static_cast<char*>(contents), totalSize);
+    // Возвращаем общий размер записанных данных
+    return totalSize;
+}
+
+// Функция для отображения меню
+void displayMenu() {
+    std::cout << "\n=== Главный Модуль ===\n";
+    std::cout << "1. Авторизация\n";
+    std::cout << "2. Просмотр профиля пользователя\n";
+    std::cout << "3. Создание теста\n";
+    std::cout << "4. Завершить\n";
+    std::cout << "Выберите действие: ";
+}
+
+// Функция для отправки POST запроса
+void sendPostRequest(const std::string& url, const std::string& data) {
+    // Инициализируем curl
+    CURL* curl = curl_easy_init();
+    if (curl) { // проверяется, что инициализация libcurl прошла успешна
+        // Создаем список заголовков
+        struct curl_slist* headers = nullptr; // список заголовок пуст
+        // Добавляем заголовок Content-Type: application/json
+        headers = curl_slist_append(headers, "Content-Type: application/json");
+        //показывает, что отправленные данные находятся в формате JSON
+
+        // Устанавливаем URL
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        // Устанавливаем данные для POST запроса
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, data.c_str());
+        // Устанавливаем HTTP-заголовки для запроса
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+        // Выполняем запрос и сохранение кода результата
+        CURLcode res = curl_easy_perform(curl);
+        // Проверяем на ошибки (успешен запрос или нет)
+        if (res != CURLE_OK) {
+            std::cerr << "Ошибка выполнения запроса: " << curl_easy_strerror(res) << std::endl;
+        } else {
+            std::cout << "Запрос успешно выполнен.\n";
+        }
+
+        // Очищаем curl
+        curl_easy_cleanup(curl);
+    }
+}
+
+// Функция для обработки авторизации
+void handleAuthorization() {
+    // Получаем email пользователя
+    std::string email;
+    std::cout << "Введите email: ";
+    std::cin >> email;
+
+    // Создаем токен для пользователя
+    std::string token = TokenManager::createToken(email);
+    // Сохраняем токен в map sessionTokens
+    sessionTokens[email] = token;
+
+    // Выводим сообщение об успешной авторизации и токен
+    std::cout << "Авторизация успешна. Токен: " << token << "\n";
+}
+
+// Функция для просмотра профиля пользователя
+void viewUserProfile() {
+    // Получаем email пользователя для проверки
+    std::string email;
+    std::cout << "Введите email для проверки: ";
+    std::cin >> email;
+
+    // Проверяем, авторизован ли пользователь
+    if (sessionTokens.find(email) != sessionTokens.end()) {
+        // Выводим информацию о пользователе
+        std::cout << "Пользователь: " << email << "\n";
+        std::cout << "Токен: " << sessionTokens[email] << "\n";
+    } else {
+        // Сообщаем, что пользователь не авторизован
+        std::cout << "Пользователь не авторизован.\n";
+    }
+}
+
+// Функция для создания теста
+void createTest() {
+    // Получаем название теста
+    std::string testName;
+    std::cout << "Введите название теста: ";
+    std::cin.ignore(); // используется, чтобы убрать остаточный символ нов.строки ()
+    std::getline(std::cin, testName);
+
+    // Получаем количество вопросов
+    int questionCount;
+    std::cout << "Введите количество вопросов: ";
+    std::cin >> questionCount;
+
+    // Получаем сами вопросы
+    std::vector<std::string> questions;
+    std::cin.ignore(); // чтобы убрать остаточный символ новой строки ()
+    for (int i = 0; i < questionCount; ++i) {
+        std::string question;
+        std::cout << "Вопрос " << i + 1 << ": ";
+        std::getline(std::cin, question);
+        questions.push_back(question); // Новый вопрос добавляется в конец вектора
+    }
+
+    // Формирование JSON-данных, а именно вопросов
+    std::string data = R"({"name":")" + testName + R"(","questions":[)";
+    for (size_t i = 0; i < questions.size(); ++i) {
+        data += "\"" + questions[i] + "\"";
+        if (i < questions.size() - 1) data += ",";
+    }
+    data += "]}";
+    
+    // Отправка данных на сервер
+    std::string url = "http://localhost:8080/api/tests";
+    sendPostRequest(url, data);
+
+    // Выводим сообщение об успешном создании теста
+    std::cout << "Тест \"" << testName << "\" успешно отправлен.\n";
+}
+
+// Функция для просмотра тестов
+void viewTests() {
+    // Инициализируем curl
+    CURL* curl = curl_easy_init();
+    std::string response;  // Переменная для хранения ответа сервера
+
+    if (curl) {
+        // Устанавливаем URL
+        curl_easy_setopt(curl, CURLOPT_URL, "http://localhost:8080/api/tests");
+
+        // Получение ответа от сервера
+        // Указываем функцию обратного вызова для записи ответа
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
+        // Указываем переменную, куда записать ответ
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+
+        // Выполняем запрос
+        CURLcode res = curl_easy_perform(curl);
+        // Проверяем на ошибки
+        if (res != CURLE_OK) {
+            std::cerr << "Ошибка выполнения запроса: " << curl_easy_strerror(res) << std::endl;
+        } else {
+            // Обработка и вывод результата
+            parseAndDisplayTests(response);
+        }
+
+        curl_easy_cleanup(curl); // чтобы освободить выделенные ресурсы и предотвратить утечку памяти
+    }
+}
+
+// Функция для парсинга и вывода тестов
+void parseAndDisplayTests(const std::string& jsonResponse) {
+    try {
+        // Парсим JSON-ответ
+        nlohmann::json tests = nlohmann::json::parse(jsonResponse);
+
+        // Выводим список тестов
+        std::cout << "\n=== Список тестов ===\n";
+        for (const auto& test : tests) {
+            std::cout << "Тест: " << test["testName"] << "\n";
+            std::cout << "Вопросы:\n";
+            for (const auto& question : test["questions"]) {
+                std::cout << "  - " << question << "\n";
+            }
+            std::cout << std::endl;
+        }
+    } catch (const std::exception& e) {
+        // Выводим ошибку при парсинге JSON
+        std::cerr << "Ошибка парсинга JSON: " << e.what() << std::endl;
+    }
+}
+
+int main() {
+    int choice = 0;
+    // Главный цикл меню
+    do {
+        displayMenu(); // Выводим меню
+        std::cin >> choice; // Получаем выбор пользователя
+
+        // Обрабатываем выбор пользователя
+        switch (choice) {
+            case 1:
+                handleAuthorization(); // Авторизация
+                break;
+            case 2:
+                viewUserProfile(); // Профиль пользователя
+                break;
+            case 3:
+                createTest(); // Создание теста
+                break;
+            case 4:
+                std::cout << "Завершение работы.\n"; // Завершение работы
+                break;
+            default:
+                std::cout << "Неверный выбор. Попробуйте снова.\n"; // Вывод сообщения об ошибке
+        }
+    } while (choice != 4); // Выполняем цикл, пока пользователь не выберет выход
+
+    return 0;
+}
