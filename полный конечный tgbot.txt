@@ -1,0 +1,562 @@
+import redis
+# Импортирует библиотеку redis для работы с базой данных Redis.
+import requests
+# Импортирует библиотеку requests для отправки HTTP-запросов.
+import os
+# Импортирует библиотеку os для работы с операционной системой, в частности с переменными окружения.
+import time
+# Импортирует библиотеку time для работы со временем.
+import logging
+# Импортирует библиотеку logging для логирования событий.
+import asyncio
+# Импортирует библиотеку asyncio для асинхронного программирования.
+from aiohttp import web
+# Импортирует `web` из `aiohttp` для создания веб-сервера.
+from flask import Flask, request
+# Импортирует `Flask` и `request` из `flask` для создания веб-сервера.
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+# Импортирует классы `Update`, `InlineKeyboardButton`, и `InlineKeyboardMarkup` из `telegram` для работы с Telegram ботом.
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler, filters, ContextTypes
+# Импортирует классы и функции из `telegram.ext` для создания Telegram бота.
+from dotenv import load_dotenv
+# Импортирует функцию `load_dotenv` из `dotenv` для загрузки переменных окружения из файла .env.
+import jwt
+# Импортирует библиотеку jwt для работы с JWT-токенами.
+import hashlib
+# Импортирует библиотеку hashlib для хеширования.
+
+# Загружаем переменные из .env файла
+load_dotenv()
+# Вызывает функцию `load_dotenv` для загрузки переменных окружения из файла .env.
+
+# Настройки Redis
+redis_client = redis.StrictRedis(host='localhost', port=6379, db=0)
+# Создает клиент Redis для работы с базой данных Redis по указанным адресу, порту и базе данных.
+
+# URL для API
+SERVER_URL = "http://loving-beetle-sharing.ngrok-free.app"  # URL сервера, замените на свой
+# Определяет константу `SERVER_URL` с URL-адресом вашего сервера
+ADMIN_JWT_TOKEN = os.getenv('JWT_TOKEN')  # Токен из файла .env
+# Определяет константу `ADMIN_JWT_TOKEN` с значением токена администратора, полученным из переменных окружения (из файла `.env`)
+
+# Состояния для аутентификации
+ASK_EMAIL, ASK_PASSWORD = range(2)
+# Определяет состояния для процесса аутентификации (ASK_EMAIL - запрос email, ASK_PASSWORD - запрос пароля).
+
+def generate_token(email: str, secret: str) -> str:
+    """Генерирует JWT-токен на основе email"""
+    payload = {'email': email}  # Payload (тело) JWT токена
+    # Создает словарь, где email пользователя является полезной нагрузкой (payload) для JWT.
+    return jwt.encode(payload, secret, algorithm="HS256")  # Кодируем токен
+    # Кодирует токен в формате JWT, используя переданный алгоритм HS256.
+
+def login(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /login без параметров."""
+    chat_id = update.effective_chat.id  # Получаем chat_id пользователя
+    # Получает chat_id пользователя из объекта `update`.
+
+    # Проверяем, есть ли chat_id в Redis
+    user_status = redis_client.get(chat_id)
+    # Получает статус пользователя (если есть) из Redis по chat_id.
+
+    if user_status is None:
+    # Если статус пользователя не найден в Redis, это означает, что пользователь не авторизован.
+        # Если ключа нет, отправляем сообщение о том, что пользователь не авторизован
+        update.message.reply_text(
+            "Вы не заголинены! Пожалуйста, авторизуйтесь через:\n"
+            "- GitHub\n"
+            "- Яндекс ID\n"
+            "- Введите код (например: /login <email> <password>)"
+        )
+        # Отправляет пользователю сообщение о том, что он не авторизован.
+    else:
+        # Если пользователь уже авторизован, уведомляем его
+        update.message.reply_text("Вы уже авторизованы.")
+        # Если статус пользователя есть в Redis, то отправляет пользователю сообщение о том, что он уже авторизован.
+
+async def login_with_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /login с email и password."""
+    chat_id = update.effective_chat.id
+    # Получает chat_id пользователя из объекта `update`.
+    try:
+    # Обрабатывает возможные исключения в коде.
+        parts = update.message.text.split()
+        # Разделяет текст сообщения пользователя на список слов.
+        if len(parts) != 3:
+        # Проверяет, что список слов содержит ровно 3 элемента (команда, email, password).
+            await update.message.reply_text("Неверный формат ввода. Используйте: /login <email> <password>")
+            # Если формат ввода неверный, отправляет сообщение об ошибке.
+            return
+            # Завершает обработку функции, если формат ввода неверный.
+        email = parts[1]
+        # Извлекает email пользователя из списка слов.
+        password = parts[2]
+         # Извлекает пароль пользователя из списка слов.
+		#Генерация токена - ключевой момент
+        token = generate_token(email)
+        # Генерирует JWT токен, вызывая функцию `generate_token` с email пользователя.
+
+        # Проверка подлинности на сервере
+        async with aiohttp.ClientSession() as session:
+         # Создает сессию aiohttp для отправки HTTP запросов.
+            async with session.post(f"{SERVER_URL}/api/auth/verify", json={"token": token, "email": email}) as response:
+            # Отправляет POST запрос на сервер для проверки токена.
+                if response.status == 200:
+                # Если запрос к серверу выполнен успешно (код 200)
+                    data = await response.json()
+                     # Получает JSON ответ от сервера.
+                    role = data.get('role')
+                     # Извлекает роль пользователя из JSON ответа.
+                    redis_client.set(chat_id, f"Authenticated:{token}:{role}")
+                    # Сохраняет в Redis статус пользователя в формате "Authenticated:<токен>:<роль>" по chat_id.
+                    await update.message.reply_text(f"Вы авторизованы как {role}!")
+                    # Отправляет пользователю сообщение об успешной авторизации и его роли.
+                else:
+                    await update.message.reply_text("Ошибка авторизации. Попробуйте еще раз.")
+                    # Если при запросе произошла ошибка, то выводим сообщение пользователю.
+
+    except Exception as e:
+    # Если при выполнении кода в блоке `try` возникло исключение
+        print(f"Ошибка при авторизации: {e}")
+        # Выводит сообщение об ошибке в консоль.
+        await update.message.reply_text("Произошла ошибка. Пожалуйста, попробуйте снова.")
+        # Отправляет пользователю сообщение об ошибке.
+
+async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Запуск процесса аутентификации через почту и пароль"""
+    await update.message.reply_text('Введите вашу почту:') # Запрашивает email
+    return ASK_EMAIL # Возвращаем состояние для запроса email
+
+# Сохранение почты пользователя и запрос пароля
+async def ask_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Запрос почты"""
+    user_email = update.message.text.strip() # Получаем email
+    if not user_email: # Если email пустой
+        await update.message.reply_text('Пожалуйста, введите корректный email.') # Сообщаем об ошибке
+        return ASK_EMAIL # Остаемся в состоянии запроса email
+    context.user_data['email'] = user_email  # Сохраняем email
+    await update.message.reply_text('Введите ваш пароль:') # Запрашиваем пароль
+    return ASK_PASSWORD # Переходим в состояние запроса пароля
+
+# Сохранение пароля и аутентификация
+async def ask_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Запрос пароля и аутентификация"""
+    user_password = update.message.text.strip() # Получаем пароль
+    if not user_password: # Если пароль пустой
+        await update.message.reply_text('Пожалуйста, введите корректный пароль.') # Сообщаем об ошибке
+        return ASK_PASSWORD # Остаемся в состоянии запроса пароля
+
+    email = context.user_data['email']  # Получаем сохраненную почту
+    # Отправляем данные на сервер для аутентификации
+    role = await authenticate_user(email, user_password) # Аутентифицируем пользователя через authenticate_user
+
+    if role is None: # Если аутентификация не удалась
+        await update.message.reply_text('Неверная почта или пароль. Попробуйте еще раз.') # Сообщаем об ошибке
+        return ConversationHandler.END  # Завершаем, если ошибка аутентификации
+
+    # Сохраняем роль пользователя
+    context.user_data['role'] = role # Сохраняем роль пользователя
+
+    if role == 'admin': # Если роль администратор
+        await update.message.reply_text(f'Здравствуйте, {update.message.from_user.first_name}! Вы администратор.') # Отправляем приветствие администратору
+    else: # Если обычный пользователь
+        await update.message.reply_text(f'Здравствуйте, {update.message.from_user.first_name}! Вы обычный пользователь.') # Отправляем приветствие пользователю
+
+    return ConversationHandler.END  # Завершаем разговор
+
+# Функция, которая проверяет роль пользователя перед выполнением команды
+async def restricted_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда, доступная только администраторам"""
+    if 'role' not in context.user_data or context.user_data['role'] != 'admin': # Если роли нет или она не администратор
+        await update.message.reply_text('У вас нет доступа к этой команде, потому что вы не администратор.') # Сообщаем об ошибке
+    else: # Если роль админ
+        await update.message.reply_text('Доступ к админ-команде получен.') # Сообщаем об успехе
+
+# Функция для проверки JWT-токена перед выполнением команды
+async def check_jwt_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Проверка JWT-токена перед выполнением команды"""
+    if 'role' not in context.user_data or context.user_data['role'] != 'admin': # Если роли нет или она не администратор
+        await update.message.reply_text('У вас нет доступа к этой команде, так как вы не администратор.') # Сообщаем об ошибке
+    else: # Если роль админ
+        # Проверка токена из файла .env
+        user_jwt_token = os.getenv('JWT_TOKEN') # Получаем токен из env
+        if user_jwt_token != ADMIN_JWT_TOKEN: # Если не совпадает с токеном admin
+            await update.message.reply_text('Ваш токен недействителен. Вы не имеете доступа к администраторским функциям.') # Сообщаем об ошибке
+        else:
+            await update.message.reply_text('JWT-токен проверен. Доступ к админ-команде получен.') # Сообщаем об успехе
+
+# Создаем приложение Flask
+app = Flask(__name__)
+
+# Логирование для отладки
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                    level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Токен бота
+TOKEN = "7413153953:AAHytomJ5muN5O-2x7ipoExC8h6U1YpDzwc"
+
+# Создаем приложение Telegram
+application = Application.builder().token(TOKEN).build()
+
+
+# Создаем вебхуки для Flask
+async def webhook_handler(request):
+    """Обработчик для вебхуков telegram. Получает данные из вебхука и ставит их в очередь telegram"""
+    try:
+        update = Update.de_json(await request.json(), application.bot) # Десериализуем обновление из JSON
+        application.update_queue.put(update) # Ставим обновление в очередь
+    except Exception as e:
+        logger.error(f"Ошибка при обработке обновления: {e}") # Выводим ошибку в консоль
+    return web.Response(status=200) # Отправляем HTTP 200 OK
+
+# Настройка вебхука
+async def set_webhook():
+    """Устанавливает webhook для telegram"""
+    url = f'https://535c-195-93-160-12.ngrok-free.app/{TOKEN}'  # URL от ngrok # Замените на свой URL
+    await application.bot.set_webhook(url) # Устанавливаем вебхук
+
+# Переменные для хранения данных о тестах и баллах
+tasts = {} # Словарь для хранения тестов
+scores = {} # Словарь для хранения результатов
+
+# Состояния для обработки создания теста
+CREATE_TEST, SET_TIME_LIMIT, ADD_QUESTION_TEXT, ADD_ANSWERS, SELECT_CORRECT_ANSWER, FINISH_CREATION, TESTS_TEST, ASK_QUESTION, CHECK_ANSWER, DELETE_TEST, CONFIRM_DELETE, DEFAULT_TYPE = range(12)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /start"""
+    await update.message.reply_text('Привет! Я бот для создания и прохождения тестов.') # Отправляем приветственное сообщение
+
+async def list_tests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /list для отображения списка тестов"""
+        # Завершаем текущее состояние, если команда /tests вызвана внутри активного теста
+    if context.user_data.get('current_test'): # Если есть текущий тест в контексте пользователя
+        return ConversationHandler.END # Завершаем текущую сессию
+    if tasts: # Если есть тесты
+        test_list = '\n'.join([f'{discipline}: {", ".join(tasts[discipline].keys())}' for discipline in tasts]) # Формируем строку со списком тестов
+        await update.message.reply_text(f'Доступные тесты:\n{test_list}') # Выводим список тестов
+    else:
+        await update.message.reply_text('Нет доступных тестов.') # Сообщаем об отсутствии тестов
+    return ConversationHandler.END # Завершаем обработчик
+
+async def create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Начало процесса создания теста"""
+    await update.message.reply_text('Введите название теста:') # Запрашиваем название теста
+    return CREATE_TEST # Переходим в состояние запроса названия
+
+async def create_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Создание теста"""
+    test_name = update.message.text.strip() # Получаем название теста
+    if not test_name: # Если название пустое
+        await update.message.reply_text('Название теста не может быть пустым. Пожалуйста, введите название теста:') # Сообщаем об ошибке
+        return CREATE_TEST # Остаёмся в текущем состоянии
+    if test_name in tasts: # Если тест с таким названием уже есть
+        await update.message.reply_text(f'Тест "{test_name}" уже существует. Пожалуйста, введите другое название теста:') # Сообщаем об ошибке
+        return CREATE_TEST # Остаёмся в текущем состоянии
+    tasts[test_name] = {'questions': [], 'time_limit': None, 'creator': update.message.from_user.id} # Создаём новый тест
+    context.user_data['current_test'] = test_name # Сохраняем название текущего теста
+    await update.message.reply_text(f'Тест "{test_name}" создан. Установите время для прохождения теста (в минутах):') # Сообщаем об успехе
+    return SET_TIME_LIMIT # Переходим в состояние установки времени
+
+async def set_time_limit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Установка времени для прохождения теста"""
+    time_limit = update.message.text.strip() # Получаем время
+    if not time_limit.isdigit(): # Если время не число
+        await update.message.reply_text('Время должно быть числом. Пожалуйста, введите время для прохождения теста (в минутах):') # Сообщаем об ошибке
+        return SET_TIME_LIMIT # Остаёмся в текущем состоянии
+    tasts[context.user_data['current_test']]['time_limit'] = int(time_limit) # Сохраняем время
+    await update.message.reply_text(f'Время для прохождения теста установлено на {time_limit} минут. Добавьте вопросы с помощью /add_question.') # Сообщаем об успехе
+    return ADD_QUESTION_TEXT # Переходим в состояние добавления вопроса
+
+async def add_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Начало процесса добавления вопроса"""
+    await update.message.reply_text('Введите вопрос:') # Запрашиваем текст вопроса
+    return ADD_QUESTION_TEXT # Переходим в состояние ввода текста вопроса
+
+async def add_question_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Ввод текста вопроса"""
+    question_text = update.message.text.strip() # Получаем текст вопроса
+    if not question_text: # Если текст пустой
+        await update.message.reply_text('Текст вопроса не может быть пустым. Пожалуйста, введите вопрос:') # Сообщаем об ошибке
+        return ADD_QUESTION_TEXT # Остаёмся в текущем состоянии
+    context.user_data['current_question'] = question_text # Сохраняем текст вопроса
+    await update.message.reply_text('Введите варианты ответов через запятую:') # Запрашиваем варианты ответов
+    return ADD_ANSWERS # Переходим в состояние ввода ответов
+
+async def add_answers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Ввод вариантов ответов"""
+    answers = [answer.strip() for answer in update.message.text.split(',')] # Получаем варианты ответов
+    if len(answers) < 2: # Если ответов меньше 2
+        await update.message.reply_text('Должно быть как минимум два варианта ответа. Пожалуйста, введите варианты ответов через запятую:') # Сообщаем об ошибке
+        return ADD_ANSWERS # Остаёмся в текущем состоянии
+    context.user_data['current_answers'] = answers # Сохраняем список ответов
+    keyboard = [[InlineKeyboardButton(answer, callback_data=f'correct_{i}')] for i, answer in enumerate(answers)] # Создаем кнопки для выбора правильного ответа
+    reply_markup = InlineKeyboardMarkup(keyboard) # Создаём разметку с кнопками
+    await update.message.reply_text('Выберите правильный ответ:', reply_markup=reply_markup) # Запрашиваем правильный ответ
+    return SELECT_CORRECT_ANSWER # Переходим в состояние выбора правильного ответа
+
+async def select_correct_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Выбор правильного ответа"""
+    query = update.callback_query # Получаем данные из callback
+    await query.answer() # Отвечаем на callback
+    correct_index = int(query.data.replace('correct_', '')) # Получаем индекс правильного ответа
+    question = {
+        'text': context.user_data['current_question'], # Текст вопроса
+        'answers': context.user_data['current_answers'], # Варианты ответа
+        'correct_answer': context.user_data['current_answers'][correct_index] # Правильный ответ
+    }
+    tasts[context.user_data['current_test']]['questions'].append(question) # Добавляем вопрос в тест
+    keyboard = [
+        [InlineKeyboardButton("Добавить еще вопрос", callback_data='add_question')], # Кнопка для добавления еще вопроса
+        [InlineKeyboardButton("Завершить создание теста", callback_data='finish_creation')] # Кнопка для завершения создания теста
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard) # Создаём разметку с кнопками
+    await query.message.reply_text('Что вы хотите сделать дальше?', reply_markup=reply_markup) # Запрашиваем дальнейшие действия
+    return FINISH_CREATION # Переходим в состояние выбора дальнейших действий
+
+async def finish_creation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Завершение создания теста или добавление еще вопроса"""
+    query = update.callback_query # Получаем данные из callback
+    await query.answer() # Отвечаем на callback
+    if query.data == 'add_question': # Если выбрано добавление вопроса
+        await query.message.reply_text('Введите вопрос:') # Запрашиваем текст вопроса
+        return ADD_QUESTION_TEXT # Переходим в состояние ввода текста вопроса
+    elif query.data == 'finish_creation': # Если выбрано завершение создания
+        await query.message.reply_text('Тест создан! Вы можете использовать:\n/create для создания собственного теста\n/tests для просмотра списка доступных тестов\n/view_results для просмотра своих результатов\n/list_rankings для ранжирования участников\n/delete для удаления своего теста.') # Сообщаем об успехе
+        return ConversationHandler.END  # Завершаем создание теста
+
+async def tests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Отображение списка тестов для прохождения"""
+    if context.user_data.get('current_test'): # Если есть текущий тест в контексте пользователя
+        return ConversationHandler.END  # Завершаем текущую сессию перед запуском нового теста
+    keyboard = [[InlineKeyboardButton(test, callback_data=f'test_{test}')] for test in tasts.keys()] # Создаём кнопки для выбора тестов
+    reply_markup = InlineKeyboardMarkup(keyboard) # Создаём разметку с кнопками
+    await update.message.reply_text('Выберите тест для прохождения:', reply_markup=reply_markup) # Запрашиваем выбор теста
+    return TESTS_TEST # Переходим в состояние выбора теста
+
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработчик кнопок при прохождении теста"""
+    query = update.callback_query # Получаем данные из callback
+    await query.answer() # Отвечаем на callback
+    if query.data.startswith('test_'): # Если нажали на кнопку с тестом
+        test_name = query.data.replace('test_', '') # Получаем имя теста
+        context.user_data['current_test'] = test_name  # Сохраняем имя текущего теста
+        context.user_data['current_question_index'] = 0 # Сбрасываем индекс текущего вопроса
+        context.user_data['correct_answers'] = 0  # Сбрасываем количество правильных ответов
+        time_limit = tasts[test_name]['time_limit'] # Получаем время для теста
+        if time_limit: # Если время ограничено
+            context.user_data['time_limit'] = time_limit # Сохраняем ограничение по времени
+            context.user_data['start_time'] = time.time() # Сохраняем время начала прохождения теста
+            minutes, seconds = divmod(time_limit * 60, 60) # Получаем минуты и секунды
+            await query.message.reply_text(f'У вас есть {minutes} минут и {seconds} секунд для прохождения теста.') # Сообщаем о времени
+        await ask_question(update, context) # Начинаем задавать вопросы
+        return ASK_QUESTION # Переходим в состояние задания вопроса
+    elif query.data.startswith('answer_'): # Если нажали на кнопку с вариантом ответа
+        await check_answer(update, context) # Проверяем ответ
+        return CHECK_ANSWER # Переходим в состояние проверки ответа
+
+async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Запрос вопроса для прохождения теста"""
+    query = update.callback_query # Получаем данные из callback
+    test_name = context.user_data['current_test'] # Получаем название теста
+    question_index = context.user_data['current_question_index'] # Получаем индекс текущего вопроса
+    question = tasts[test_name]['questions'][question_index] # Получаем вопрос
+    keyboard = [[InlineKeyboardButton(answer, callback_data=f'answer_{answer}')] for answer in question['answers']] # Создаем кнопки с ответами
+    reply_markup = InlineKeyboardMarkup(keyboard) # Создаём разметку с кнопками
+    await query.message.reply_text(question['text'], reply_markup=reply_markup) # Отправляем вопрос
+    return CHECK_ANSWER # Переходим в состояние проверки ответа
+
+async def view_results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Отображение результатов пользователя"""
+    user_name = update.message.from_user.first_name # Получаем имя пользователя
+    if user_name not in scores: # Если нет результатов
+        await update.message.reply_text('У вас нет результатов.') # Сообщаем об отсутствии результатов
+        return # Завершаем
+    user_scores = scores[user_name] # Получаем результаты пользователя
+    results = '\n'.join([f'Тест: {test_name}, Количество правильных ответов: {score}' for test_name, score in user_scores.items()]) # Формируем строку с результатами
+    await update.message.reply_text(f'Пользователь: {user_name}\nРезультаты:\n{results}') # Отправляем результаты
+
+async def update_score(user_name: str, test_name: str, score: int) -> None:
+    """Обновление результатов пользователя"""
+    if user_name not in scores: # Если нет результатов
+        scores[user_name] = {} # Создаём запись о пользователе
+    scores[user_name][test_name] = score # Сохраняем результаты
+
+async def check_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Проверка ответа пользователя"""
+    query = update.callback_query # Получаем данные из callback
+    await query.answer() # Отвечаем на callback
+    selected_answer = query.data.replace('answer_', '') # Получаем выбранный ответ
+    test_name = context.user_data['current_test'] # Получаем имя теста
+    question_index = context.user_data['current_question_index'] # Получаем индекс текущего вопроса
+    correct_answer = tasts[test_name]['questions'][question_index]['correct_answer'] # Получаем правильный ответ
+    if selected_answer == correct_answer: # Если ответ правильный
+        context.user_data['correct_answers'] += 1 # Увеличиваем количество правильных ответов
+    context.user_data['current_question_index'] += 1 # Переходим к следующему вопросу
+    if context.user_data['current_question_index'] < len(tasts[test_name]['questions']): # Если вопросы ещё есть
+        elapsed_time = time.time() - context.user_data['start_time'] # Получаем прошедшее время
+        remaining_time = context.user_data['time_limit'] * 60 - elapsed_time # Высчитываем оставшееся время
+        minutes, seconds = divmod(remaining_time, 60) # Форматируем оставшееся время
+        await query.message.reply_text(f'Осталось {int(minutes)} минут и {int(seconds)} секунд.') # Сообщаем об оставшемся времени
+        await ask_question(update, context) # Задаём следующий вопрос
+        return ASK_QUESTION # Переходим в состояние задания вопроса
+    else: # Если вопросов нет
+        correct_answers = context.user_data['correct_answers'] # Получаем количество правильных ответов
+        total_questions = len(tasts[test_name]['questions']) # Получаем количество всех вопросов
+        await query.message.reply_text(f'Вы завершили тест! Количество правильных ответов: {correct_answers}/{total_questions}') # Сообщаем о завершении теста и результатах
+        user_name = update.callback_query.from_user.first_name # Получаем имя пользователя
+        await update_score(user_name, test_name, correct_answers) # Сохраняем результат
+        return ConversationHandler.END  # Завершаем прохождение теста
+
+async def list_rankings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Отображение рейтинга пользователей"""
+    if scores: # Если есть результаты
+        user_scores = {user: sum(test_scores.values()) for user, test_scores in scores.items()} # Считаем общий балл пользователя
+        sorted_scores = sorted(user_scores.items(), key=lambda item: item[1], reverse=True) # Сортируем по убыванию
+        ranking_list = '\n'.join([f'{user_name}: {score} баллов' for user_name, score in sorted_scores]) # Формируем список рейтинга
+        await update.message.reply_text(f'Рейтинг участников:\n{ranking_list}') # Отправляем рейтинг
+    else: # Если нет данных
+        await update.message.reply_text('Нет данных о рейтингах.') # Сообщаем об отсутствии данных
+
+async def delete_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Запуск процесса удаления теста"""
+    user_id = update.message.from_user.id # Получаем ID пользователя
+    user_tests = [test for test, details in tasts.items() if details['creator'] == user_id] # Получаем тесты созданные пользователем
+    if not user_tests: # Если нет тестов
+        await update.message.reply_text('У вас нет тестов для удаления.') # Сообщаем об отсутствии тестов
+        return # Завершаем
+    tests_list = '\n'.join(user_tests) # Формируем список тестов
+    await update.message.reply_text(f'Ваши тесты:\n{tests_list}\nВведите название теста, который вы хотите удалить:') # Отправляем список тестов и запрашиваем имя теста
+    context.user_data['deleting_test'] = True # Устанавливаем флаг, что тест удаляется
+
+async def confirm_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Удаление теста"""
+    if context.user_data.get('deleting_test'): # Если тест удаляется
+        test_name = update.message.text.strip() # Получаем имя теста
+        if test_name in tasts and tasts[test_name]['creator'] == update.message.from_user.id: # Проверяем, есть ли тест и является ли пользователь его создателем
+            del tasts[test_name] # Удаляем тест
+            await update.message.reply_text(f'Тест "{test_name}" был удален.') # Сообщаем об успехе
+        else: # Если тест не найден или пользователь не его создатель
+            await update.message.reply_text('Тест не найден или вы не являетесь его создателем.') # Сообщаем об ошибке
+        context.user_data['deleting_test'] = False # Снимаем флаг
+    return ConversationHandler.END  # Завершаем удаление теста
+
+async def handle_updates(app, application):
+    """Обработчик обновлений для телеграм"""
+    while True:
+        try:
+            update = await app['updates'].get()  # Получаем обновление из очереди
+            if update: # Если есть обновление
+                application.update_queue.put(update) # Помещаем в очередь
+            else: # Если нет обновления
+                await asyncio.sleep(0.1) # Задержка, если очередь пуста
+        except Exception as e: # Если произошла ошибка
+            logging.error(f"Error handling updates: {e}") # Выводим ошибку в консоль
+            await asyncio.sleep(1) # Ждём
+
+async def run_flask():
+    """Запуск web-сервера на flask"""
+    app = web.Application() # Создаём веб-приложение aiohttp
+    app.router.add_post(f"/{TOKEN}", webhook_handler) # Добавляем обработчик для вебхуков
+
+    async def start_flask():
+        runner = web.AppRunner(app) # Создаём Runner
+        await runner.setup() # Настраиваем Runner
+        site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 8080))) # Создаём TCPSite
+        await site.start() # Запускаем site
+        app['updates'] = asyncio.Queue() # Создаём очередь для обновлений
+        update_task = asyncio.create_task(handle_updates(app, application)) # Создаём задачу для обработки обновлений
+        await update_task  # Ожидаем завершение задачи обработки обновлений
+
+    await start_flask() # Запускаем Flask
+
+async def start_bot():
+    """Функция для запуска телеграм бота"""
+    application = Application.builder().token(TOKEN).build() # Создаём приложение телеграм бота
+    # Обработчик для команды /login без параметров
+    application.add_handler(CommandHandler("login", login)) # Добавляем обработчик для команды /login
+
+    # Обработчик для команды /login с параметром type
+    application.add_handler(CommandHandler("login", login_with_type)) # Добавляем обработчик для команды /login <email> <password>
+    """Основная функция для запуска бота"""
+
+    # Обработчик команды /login
+    login_conv_handler = ConversationHandler( # Создаём ConversationHandler для обработки логина
+        entry_points=[CommandHandler('login', login_command)],  # При вызове /login запускается запрос почты
+        states={ # Состояния
+            ASK_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_email)],  # Запрос почты
+            ASK_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_password)],  # Запрос пароля
+            CREATE_TEST: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_test)], # Запрос названия теста
+            SET_TIME_LIMIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_time_limit)], # Установка времени для прохождения теста
+            ADD_QUESTION_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_question_text)], # Добавление текста вопроса
+            ADD_ANSWERS: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_answers)], # Добавление вариантов ответа
+            SELECT_CORRECT_ANSWER: [CallbackQueryHandler(select_correct_answer)], # Выбор правильного ответа
+            FINISH_CREATION: [CallbackQueryHandler(finish_creation)],  # Завершение создания теста
+            TESTS_TEST: [CallbackQueryHandler(button)],  # Выбор теста
+            ASK_QUESTION: [CallbackQueryHandler(button)],  # Прохождение теста
+            CHECK_ANSWER: [CallbackQueryHandler(check_answer)],  # Проверка ответа на тест
+        },
+        fallbacks=[CommandHandler('start', start)], # Запускаем /start если что-то пошло не так
+    )
+
+    # Добавление обработчиков
+
+    application.add_handler(login_conv_handler) 
+    # Добавляем ConversationHandler для обработки логина (последовательный ввод email и пароля)
+
+    application.add_handler(CommandHandler('restricted', restricted_access))  
+    # Добавляем обработчик для команды /restricted, вызывающий функцию restricted_access (только для администраторов)
+    
+    application.add_handler(CommandHandler('check_token', check_jwt_token))  
+    # Добавляем обработчик для команды /check_token, вызывающий функцию check_jwt_token (проверка JWT токена)
+
+    application.add_handler(CommandHandler('list', list_tests))
+    # Добавляем обработчик для команды /list, вызывающий функцию list_tests (выводит список тестов)
+
+    application.add_handler(CommandHandler('tests', tests))
+    # Добавляем обработчик для команды /tests, вызывающий функцию tests (выводит список тестов для прохождения)
+
+    application.add_handler(CommandHandler('start', start))
+    # Добавляем обработчик для команды /start, вызывающий функцию start (стартовое сообщение бота)
+    
+    application.add_handler(CommandHandler('view_results', view_results))
+    # Добавляем обработчик для команды /view_results, вызывающий функцию view_results (показывает результаты пользователя)
+
+    application.add_handler(CallbackQueryHandler(button))
+    # Добавляем обработчик для всех callback query (кнопки), вызывающий функцию button (для работы с тестами)
+
+    application.add_handler(CommandHandler('list_rankings', list_rankings))
+    # Добавляем обработчик для команды /list_rankings, вызывающий функцию list_rankings (выводит рейтинг пользователей)
+
+    application.add_handler(CommandHandler('delete', delete_test))
+    # Добавляем обработчик для команды /delete, вызывающий функцию delete_test (удаление теста)
+
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_delete))
+    # Добавляем обработчик для всех текстовых сообщений (кроме команд), вызывающий функцию confirm_delete (подтверждение удаления теста)
+
+    await set_webhook()  
+    # Вызываем set_webhook асинхронно для установки вебхука телеграм бота (получение обновлений от телеграм)
+    
+    try: # Обработка ошибок
+      await application.initialize()
+      # Инициализируем приложение телеграм бота
+      await application.start() 
+      # Запускаем приложение телеграм бота
+      await application.run_polling() 
+      # Запускаем поллинг бота, чтобы получать обновления
+    except Exception as e: # Если произошла ошибка
+        print(f"Error running Telegram bot: {e}") # Выводим ошибку в консоль
+        await asyncio.sleep(1) # Ждем 1 секунду, прежде чем запустить код заново
+    finally: # Выполняется всегда
+      await application.shutdown() # Завершаем приложение телеграм бота
+
+
+async def main():
+    """Главная функция для запуска"""
+    await asyncio.gather(run_flask(), start_bot())
+    # Запускаем оба приложения (вебсервер и телеграм бот) параллельно
+
+if __name__ == "__main__":
+    """Основная точка входа в программу"""
+    asyncio.run(main()) 
+    # Запускаем асинхронную функцию main() (запускаем event loop)
