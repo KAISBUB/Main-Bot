@@ -1,223 +1,147 @@
-#include <iostream> // ввод/вывод
-#include <string> // работа со строками
-#include <vector> // работа с динамическими массивами
-#include <map> // работа с ассоциативными массивами
-#include <curl/curl.h> // работа с библиотекой libcurl, которая используется для отправки HTTP запросов
-#include "TokenManager.h" // для создания токенов
-#include "UserManager.h" // отвечает за управление пользователями
-#include "TestManager.h" // овтечает за управление тестами
-#include <nlohmann/json.hpp>  // Подключаем библиотеку для работы с JSON
+#include <filesystem> //для работы с путями файлов (где находится база данных)
+#include <sqlite3.h> // для работы с базой данных SQLite.
+#include <iostream> 
+#include <string> 
+#include <vector> // использовал для создания списков
+#include <sstream> // для работы со строками, как с потоками
+#include <nlohmann/json.hpp> // Подключение библиотеки для работы с JSON
 
-// Простая структура для взаимодействия с пользователями (хранение токенов авториз. польз.)
-std::map<std::string, std::string> sessionTokens; // ключи (email польз. и токен сессии)
+using json = nlohmann::json; // сделали краткую форму
 
-// Прототип функции, которая будет парсить (анализировать) JSON-ответ с информацией о тестах и выводить ее.
-void parseAndDisplayTests(const std::string& jsonResponse);
-
-// Функция обратного вызова для curl, записывает ответ сервера в строку
-size_t writeCallback(void* contents, size_t size, size_t nmemb, void* userData) {
-    // Вычисляем общий размер полученных данных
-    size_t totalSize = size * nmemb;
-    // Получаем указатель на строку, в которую нужно записать данные
-    std::string* response = static_cast<std::string*>(userData);
-    // Добавляем полученные данные в строку
-    response->append(static_cast<char*>(contents), totalSize);
-    // Возвращаем общий размер записанных данных
-    return totalSize;
-}
-
-// Функция для отображения меню
-void displayMenu() {
-    std::cout << "\n=== Главный Модуль ===\n";
-    std::cout << "1. Авторизация\n";
-    std::cout << "2. Просмотр профиля пользователя\n";
-    std::cout << "3. Создание теста\n";
-    std::cout << "4. Завершить\n";
-    std::cout << "Выберите действие: ";
-}
-
-// Функция для отправки POST запроса
-void sendPostRequest(const std::string& url, const std::string& data) {
-    // Инициализируем curl
-    CURL* curl = curl_easy_init();
-    if (curl) { // проверяется, что инициализация libcurl прошла успешна
-        // Создаем список заголовков
-        struct curl_slist* headers = nullptr; // список заголовок пуст
-        // Добавляем заголовок Content-Type: application/json
-        headers = curl_slist_append(headers, "Content-Type: application/json");
-        //показывает, что отправленные данные находятся в формате JSON
-
-        // Устанавливаем URL
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        // Устанавливаем данные для POST запроса
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, data.c_str());
-        // Устанавливаем HTTP-заголовки для запроса
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-
-        // Выполняем запрос и сохранение кода результата
-        CURLcode res = curl_easy_perform(curl);
-        // Проверяем на ошибки (успешен запрос или нет)
-        if (res != CURLE_OK) {
-            std::cerr << "Ошибка выполнения запроса: " << curl_easy_strerror(res) << std::endl;
+class DatabaseManager { // класс для управления базой данных
+public:
+    DatabaseManager(const std::string& dbName) {
+        // Вывод абсолютного пути к файлу базы данных
+        std::cout << "Путь к базе данных: " << std::filesystem::absolute(dbName) << "\n";
+        // Попытка открыть базу данных
+        if (sqlite3_open(dbName.c_str(), &db) != SQLITE_OK) {
+            std::cerr << "Ошибка открытия базы данных: " << sqlite3_errmsg(db) << std::endl;
+            // Установка указателя на базу данных в nullptr
+            db = nullptr;
         } else {
-            std::cout << "Запрос успешно выполнен.\n";
+            std::cerr << "База данных успешно открыта: " << dbName << std::endl;
+        }
+    }
+
+    ~DatabaseManager() { // проверяем на открытость базу данных, чтобы не было утечки данных
+        if (db) {
+            sqlite3_close(db);
+            std::cerr << "База данных закрыта." << std::endl;
+        }
+    }
+
+    bool createTable() { // проверка на таблицу
+        const char* createTableSQL = // запрос на создание таблицы, если её нет
+            "CREATE TABLE IF NOT EXISTS tests ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "name TEXT NOT NULL,"
+            "questions TEXT NOT NULL,"
+            "creator TEXT NOT NULL);";
+
+        char* errMsg = nullptr; //для хранения сообщения об ошибке
+        if (sqlite3_exec(db, createTableSQL, nullptr, nullptr, &errMsg) != SQLITE_OK) {
+            std::cerr << "Ошибка создания таблицы: " << errMsg << std::endl;
+            sqlite3_free(errMsg);
+            return false; // проверили на выполнение запроса
+        }
+        std::cerr << "Таблица 'tests' успешно создана или уже существует." << std::endl;
+        return true;
+    }
+
+    bool insertTest(const std::string& name, const std::vector<std::string>& questions, const std::string& creator) {
+        std::string questionsSerialized; // Инициализация строки для вопросов в виде строки
+        for (const auto& question : questions) { // Цикл для добавления вопросов в строку
+            questionsSerialized += question + ";";
+        }
+        // SQL-запрос для вставки данных в таблицу
+        const char* insertSQL = "INSERT INTO tests (name, questions, creator) VALUES (?, ?, ?);";
+        sqlite3_stmt* stmt; // Хранит информацию о подготовленном SQL-запросе
+        // Подготовка запроса к выполнению
+        if (sqlite3_prepare_v2(db, insertSQL, -1, &stmt, nullptr) != SQLITE_OK) {
+            std::cerr << "Ошибка подготовки запроса: " << sqlite3_errmsg(db) << std::endl;
+            return false;
+        }
+        // Привязка параметров
+        sqlite3_bind_text(stmt, 1, name.c_str(), -1, SQLITE_STATIC); // Привязывает значение к placeholder в SQL-запросе
+        sqlite3_bind_text(stmt, 2, questionsSerialized.c_str(), -1, SQLITE_STATIC); // привязывает значение для вопросов и создателя
+        sqlite3_bind_text(stmt, 3, creator.c_str(), -1, SQLITE_STATIC); // привязывает значение для вопросов и создателя
+        // Выполнение запросов
+        if (sqlite3_step(stmt) != SQLITE_DONE) {
+            std::cerr << "Ошибка выполнения запроса: " << sqlite3_errmsg(db) << std::endl;
+            sqlite3_finalize(stmt);
+            return false;
         }
 
-        // Очищаем curl
-        curl_easy_cleanup(curl);
-    }
-}
-
-// Функция для обработки авторизации
-void handleAuthorization() {
-    // Получаем email пользователя
-    std::string email;
-    std::cout << "Введите email: ";
-    std::cin >> email;
-
-    // Создаем токен для пользователя
-    std::string token = TokenManager::createToken(email);
-    // Сохраняем токен в map sessionTokens
-    sessionTokens[email] = token;
-
-    // Выводим сообщение об успешной авторизации и токен
-    std::cout << "Авторизация успешна. Токен: " << token << "\n";
-}
-
-// Функция для просмотра профиля пользователя
-void viewUserProfile() {
-    // Получаем email пользователя для проверки
-    std::string email;
-    std::cout << "Введите email для проверки: ";
-    std::cin >> email;
-
-    // Проверяем, авторизован ли пользователь
-    if (sessionTokens.find(email) != sessionTokens.end()) {
-        // Выводим информацию о пользователе
-        std::cout << "Пользователь: " << email << "\n";
-        std::cout << "Токен: " << sessionTokens[email] << "\n";
-    } else {
-        // Сообщаем, что пользователь не авторизован
-        std::cout << "Пользователь не авторизован.\n";
-    }
-}
-
-// Функция для создания теста
-void createTest() {
-    // Получаем название теста
-    std::string testName;
-    std::cout << "Введите название теста: ";
-    std::cin.ignore(); // используется, чтобы убрать остаточный символ нов.строки ()
-    std::getline(std::cin, testName);
-
-    // Получаем количество вопросов
-    int questionCount;
-    std::cout << "Введите количество вопросов: ";
-    std::cin >> questionCount;
-
-    // Получаем сами вопросы
-    std::vector<std::string> questions;
-    std::cin.ignore(); // чтобы убрать остаточный символ новой строки ()
-    for (int i = 0; i < questionCount; ++i) {
-        std::string question;
-        std::cout << "Вопрос " << i + 1 << ": ";
-        std::getline(std::cin, question);
-        questions.push_back(question); // Новый вопрос добавляется в конец вектора
+        sqlite3_finalize(stmt);
+        std::cerr << "Тест успешно добавлен в базу данных." << std::endl;
+        return true;
     }
 
-    // Формирование JSON-данных, а именно вопросов
-    std::string data = R"({"name":")" + testName + R"(","questions":[)";
-    for (size_t i = 0; i < questions.size(); ++i) {
-        data += "\"" + questions[i] + "\"";
-        if (i < questions.size() - 1) data += ",";
-    }
-    data += "]}";
-    
-    // Отправка данных на сервер
-    std::string url = "http://localhost:8080/api/tests";
-    sendPostRequest(url, data);
-
-    // Выводим сообщение об успешном создании теста
-    std::cout << "Тест \"" << testName << "\" успешно отправлен.\n";
-}
-
-// Функция для просмотра тестов
-void viewTests() {
-    // Инициализируем curl
-    CURL* curl = curl_easy_init();
-    std::string response;  // Переменная для хранения ответа сервера
-
-    if (curl) {
-        // Устанавливаем URL
-        curl_easy_setopt(curl, CURLOPT_URL, "http://localhost:8080/api/tests");
-
-        // Получение ответа от сервера
-        // Указываем функцию обратного вызова для записи ответа
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
-        // Указываем переменную, куда записать ответ
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-
-        // Выполняем запрос
-        CURLcode res = curl_easy_perform(curl);
-        // Проверяем на ошибки
-        if (res != CURLE_OK) {
-            std::cerr << "Ошибка выполнения запроса: " << curl_easy_strerror(res) << std::endl;
-        } else {
-            // Обработка и вывод результата
-            parseAndDisplayTests(response);
-        }
-
-        curl_easy_cleanup(curl); // чтобы освободить выделенные ресурсы и предотвратить утечку памяти
-    }
-}
-
-// Функция для парсинга и вывода тестов
-void parseAndDisplayTests(const std::string& jsonResponse) {
-    try {
-        // Парсим JSON-ответ
-        nlohmann::json tests = nlohmann::json::parse(jsonResponse);
-
-        // Выводим список тестов
-        std::cout << "\n=== Список тестов ===\n";
-        for (const auto& test : tests) {
-            std::cout << "Тест: " << test["testName"] << "\n";
-            std::cout << "Вопросы:\n";
-            for (const auto& question : test["questions"]) {
-                std::cout << "  - " << question << "\n";
-            }
-            std::cout << std::endl;
-        }
-    } catch (const std::exception& e) {
-        // Выводим ошибку при парсинге JSON
-        std::cerr << "Ошибка парсинга JSON: " << e.what() << std::endl;
-    }
-}
+private:
+    sqlite3* db; // создание переменной для хран. указателя на соединение с баз. дан.
+};
 
 int main() {
-    int choice = 0;
-    // Главный цикл меню
-    do {
-        displayMenu(); // Выводим меню
-        std::cin >> choice; // Получаем выбор пользователя
+    // Читаем JSON
+    std::string inputJson;
+    std::getline(std::cin, inputJson);
 
-        // Обрабатываем выбор пользователя
-        switch (choice) {
-            case 1:
-                handleAuthorization(); // Авторизация
-                break;
-            case 2:
-                viewUserProfile(); // Профиль пользователя
-                break;
-            case 3:
-                createTest(); // Создание теста
-                break;
-            case 4:
-                std::cout << "Завершение работы.\n"; // Завершение работы
-                break;
-            default:
-                std::cout << "Неверный выбор. Попробуйте снова.\n"; // Вывод сообщения об ошибке
-        }
-    } while (choice != 4); // Выполняем цикл, пока пользователь не выберет выход
+    std::cerr << "Полученный JSON: " << inputJson << std::endl;
 
+    // Парсинг JSON
+    json root;
+    try {
+        root = json::parse(inputJson);
+    } catch (const json::parse_error& e) {
+        std::cerr << "Ошибка парсинга JSON: " << e.what() << std::endl;
+        return 1;
+    }
+
+    // Извлечение данных из JSON
+    std::string testName;
+    std::vector<std::string> questions;
+    std::string creator;
+
+    try {
+    testName = root.at("name").get<std::string>();
+    
+    // Попытка извлечь "creator", если оно отсутствует, будет использовано значение по умолчанию
+    if (root.contains("creator")) {
+        creator = root.at("creator").get<std::string>();
+    } else {
+        creator = "unknown_creator"; // Значение по умолчанию
+    }
+
+    // Извлечение вопросов из массива объектов
+    for (const auto& questionObj : root.at("questions")) {
+        std::string questionText = questionObj.at("question").get<std::string>();
+        questions.push_back(questionText);
+    }
+} catch (const json::out_of_range& e) {
+    std::cerr << "Ошибка извлечения данных из JSON: " << e.what() << std::endl;
+    return 1;
+}
+
+    std::cerr << "Название теста: " << testName << std::endl;
+    std::cerr << "Создатель: " << creator << std::endl;
+    std::cerr << "Вопросы: ";
+    for (const auto& q : questions) {
+        std::cerr << q << ", ";
+    }
+    std::cerr << std::endl;
+
+    // Создание базы данных
+    DatabaseManager dbManager("tests.db");
+
+    if (!dbManager.createTable()) {
+        return 1;
+    }
+
+    // Добавление теста в базу данных
+    if (!dbManager.insertTest(testName, questions, creator)) {
+        return 1;
+    }
+
+    std::cout << "Тест успешно обработан." << std::endl;
     return 0;
 }
